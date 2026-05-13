@@ -3,19 +3,13 @@ from threading import Thread
 import os
 import sqlite3
 
-from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
-    ConversationHandler,
     filters,
 )
 
@@ -34,7 +28,7 @@ def run_web():
     port = int(os.environ.get("PORT", 10000))
     app_flask.run(host="0.0.0.0", port=port)
 
-# ---------------- DB ----------------
+# ---------------- DATABASE ----------------
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -52,7 +46,15 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_task(name, date, time, freq):
+def get_tasks():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, name, date, time, frequency, done FROM tasks")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def add_task_db(name, date, time, freq):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
@@ -62,14 +64,6 @@ def add_task(name, date, time, freq):
     conn.commit()
     conn.close()
 
-def get_tasks():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT * FROM tasks")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
 def toggle_task(task_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -77,88 +71,24 @@ def toggle_task(task_id):
     conn.commit()
     conn.close()
 
-# ---------------- FSM STATES ----------------
+def delete_task(task_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
 
-NAME, DATE, TIME, FREQ = range(4)
+def edit_task_name(task_id, new_name):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE tasks SET name = ? WHERE id = ?", (new_name, task_id))
+    conn.commit()
+    conn.close()
 
-user_data_temp = {}
+# ---------------- UI RENDER ----------------
 
-# ---------------- START MENU ----------------
+def render_keyboard(tasks):
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    keyboard = [
-        ["➕ Створити задачу"],
-        ["📋 Список задач"]
-    ]
-
-    await update.message.reply_text(
-        "📌 Меню:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-
-# ---------------- CREATE FLOW ----------------
-
-async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    await update.message.reply_text("Введи назву задачі:")
-    return NAME
-
-async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user_data_temp[update.effective_user.id] = {}
-    user_data_temp[update.effective_user.id]["name"] = update.message.text
-
-    await update.message.reply_text("Введи дату (YYYY-MM-DD):")
-    return DATE
-
-async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user_data_temp[update.effective_user.id]["date"] = update.message.text
-
-    await update.message.reply_text("Введи час (HH:MM):")
-    return TIME
-
-async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user_data_temp[update.effective_user.id]["time"] = update.message.text
-
-    await update.message.reply_text("Частота: daily / weekly / monthly / once")
-    return FREQ
-
-async def get_freq(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    freq = update.message.text.lower()
-    uid = update.effective_user.id
-
-    if freq not in ["daily", "weekly", "monthly", "once"]:
-        await update.message.reply_text("Невірна частота")
-        return FREQ
-
-    data = user_data_temp.get(uid)
-
-    add_task(
-        data["name"],
-        data["date"],
-        data["time"],
-        freq
-    )
-
-    await update.message.reply_text("✅ Задачу створено!")
-
-    return ConversationHandler.END
-
-# ---------------- LIST ----------------
-
-async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    tasks = get_tasks()
-
-    if not tasks:
-        await update.message.reply_text("Порожньо")
-        return
-
-    text = "📋 Задачі:\n\n"
     keyboard = []
 
     for t in tasks:
@@ -166,60 +96,61 @@ async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         status = "✅" if done else "❌"
 
-        text += f"{tid}. {status} {name}\n{date} {time} ({freq})\n\n"
-
         keyboard.append([
             InlineKeyboardButton(
                 f"{status} {name}",
-                callback_data=str(tid)
-            )
+                callback_data=f"toggle:{tid}"
+            ),
+            InlineKeyboardButton(
+                "✏",
+                callback_data=f"edit:{tid}"
+            ),
+            InlineKeyboardButton(
+                "🗑",
+                callback_data=f"delete:{tid}"
+            ),
         ])
 
+    return InlineKeyboardMarkup(keyboard)
+
+def render_text(tasks):
+
+    text = "📋 Чеклист:\n\n"
+
+    for t in tasks:
+        tid, name, date, time, freq, done = t
+        status = "✅" if done else "❌"
+        text += f"{tid}. {status} {name} ({freq})\n"
+
+    return text
+
+# ---------------- STATES (EDIT) ----------------
+
+EDIT_MODE = {}
+
+# ---------------- START ----------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "📌 Todo Bot\n\n"
+        "/list - список\n"
+        "/add Назва | YYYY-MM-DD | HH:MM | freq"
     )
 
-# ---------------- TOGGLE ----------------
+# ---------------- ADD ----------------
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    query = update.callback_query
-    await query.answer()
+    text = update.message.text.replace("/add ", "")
 
-    toggle_task(int(query.data))
+    if text.count("|") != 3:
+        await update.message.reply_text(
+            "Формат:\n/add Назва | YYYY-MM-DD | HH:MM | daily/weekly/monthly/once"
+        )
+        return
 
-    await list_tasks(update, context)
+    name, date, time, freq = [x.strip() for x in text.split("|")]
 
-# ---------------- RUN ----------------
-
-def run_bot():
-
-    init_db()
-
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex("➕ Створити задачу"), create_start)
-        ],
-        states={
-            NAME: [MessageHandler(filters.TEXT, get_name)],
-            DATE: [MessageHandler(filters.TEXT, get_date)],
-            TIME: [MessageHandler(filters.TEXT, get_time)],
-            FREQ: [MessageHandler(filters.TEXT, get_freq)],
-        },
-        fallbacks=[]
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("📋 Список задач"), list_tasks))
-    app.add_handler(conv_handler)
-    app.add_handler(CallbackQueryHandler(button))
-
-    print("Todo FSM bot started!")
-
-    app.run_polling()
-
-Thread(target=run_web).start()
-run_bot()
+    if freq not in ["daily", "weekly", "monthly", "once"]:
+        await update.message.reply_text("freq: daily / weekly / monthly / once")
